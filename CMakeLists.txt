@@ -10,7 +10,7 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 include_directories("/home/502/aph502/code/fortran/cmake_test/src")
 link_directories("/home/502/aph502/code/fortran/cmake_test/src")
 
-# Create an executable file called helloworld from sources:
-add_executable("treegrid" "treegrid.f90")
+# Create an executable file 
+add_executable("treegrid" "treegrid.f90" regrid.f90)
 
 target_link_libraries(treegrid modules netcdff)
