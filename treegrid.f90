@@ -10,10 +10,11 @@ program treegrid
   use string_functions, only: join
   use file_functions, only: exists, freeunit, stderr, stdout, open
   use precision
-  use regrid, only: regrid_real_2d
+  use regrid_functions, only: regrid
+  use pathfind_functions, only: earth_R
 
   implicit none
-  
+
   character(len=2000) :: datafile, gridfile, fname, outfile
   character(len=200) :: latname, lonname, varname
 
@@ -30,8 +31,10 @@ program treegrid
   type(ncvar) :: v, xgridv, ygridv
 
   logical :: supergrid
+
+  real :: radius, oceanfrac, depth
   
-  type (varying_string) :: myoptions(4)
+  type (varying_string) :: myoptions(8)
 
   ! These are our accepted command line options (see subroutine usage for
   ! an explanation)
@@ -39,6 +42,10 @@ program treegrid
   myoptions(2) = 'var'
   myoptions(3) = 'lon'
   myoptions(4) = 'lat'
+  myoptions(5) = 'radius'
+  myoptions(6) = 'oceanfrac'
+  myoptions(7) = 'depth'
+  myoptions(8) = 'outfile'
 
   ! This call parses the command line arguments for command line options
   call get_options(myoptions, error)
@@ -101,6 +108,57 @@ program treegrid
      latname = "y"
   end if
 
+  if (option_exists('radius')) then
+     ! Specified a radius (in km) over which to regrid for each pixel
+     if (.NOT. has_value('radius')) then
+        write(stderr,*) 'Option radius must specify a value!'
+        call usage
+        stop
+     end if
+     radius = get_value('radius')
+  else
+     radius = 100.
+  end if
+  ! Normalise by radius of earth. Input radius is defined in kilometres, earth_R is
+  ! defined in metres
+  radius = 1000. * (radius / earth_R)
+
+  if (option_exists('oceanfrac')) then
+     ! Specified a depth
+     if (.NOT. has_value('oceanfrac')) then
+        write(stderr,*) 'Option oceanfrac must specify a value!'
+        call usage
+        stop
+     end if
+     oceanfrac = get_value('oceanfrac')
+  else
+     oceanfrac = 0.5
+  end if
+
+  if (option_exists('depth')) then
+     ! Specified a depth
+     if (.NOT. has_value('depth')) then
+        write(stderr,*) 'Option depth must specify a value!'
+        call usage
+        stop
+     end if
+     depth = get_value('depth')
+  else
+     depth = 0.
+  end if
+
+  if (option_exists('outfile')) then
+     ! We have specified outfile name
+     if (.NOT. has_value('outfile')) then
+        write(stderr,*) 'Option outfile must specify a value!'
+        call usage
+        stop
+     end if
+     outfile = ""
+     outfile = get_value('outfile')
+  else
+     outfile = "regridded.nc"
+  end if
   ! Read in data to be re-gridded
   datafile = next_arg()
 
@@ -178,17 +236,18 @@ program treegrid
   end if
   allocate(newdata(nx,ny))
 
-  call regrid_real_2d(data, src_grid, dst_grid, newdata)
+  call regrid(data, src_grid, dst_grid, newdata, data<depth, oceanfrac)
+  ! call regrid(data, src_grid, dst_grid, radius, newdata, data<0., oceanfrac)
+  ! call regrid(data, src_grid, dst_grid, newdata)
 
   ! Save result
   print *,"Save result"
-  outfile = 'regridded.nc'
   call nc_create(outfile,overwrite=.TRUE.,netcdf4=.TRUE.)
   call nc_write_dim(outfile,"lon",x=dst_grid(1,:,1))
   call nc_write_dim(outfile,"lat",x=dst_grid(2,1,:))
   call nc_write(outfile,"geolon_uv",dst_grid(1,:,:),dim1="lon",dim2="lat",long_name="uv longitude",units="degrees_E")
   call nc_write(outfile,"geolat_uv",dst_grid(2,:,:),dim1="lon",dim2="lat",long_name="uv latitude",units="degrees_N")
-  call nc_write(outfile,varname,newdata(:,:),dim1="lon",dim2="lat")
+  call nc_write(outfile,varname,newdata(:,:),dim1="lon",dim2="lat",missing_value=-1e30)
 
 contains
 
