@@ -16,3 +16,14 @@ link_directories("/home/502/aph502/code/fortran/cmake_test/src")
 add_executable("treegrid" "treegrid.f90" regrid_functions.f90)
 
 target_link_libraries(treegrid modules netcdff)
+
+# Create an executable file 
+add_executable("partial_cell_check" "partial_cell_check.f90")
+
+target_link_libraries(partial_cell_check modules netcdff)
+
+# Create an executable file 
+add_executable("interpfield" "interpfield.f90" "spline.f90")
+
+target_link_libraries(interpfield modules netcdff)
+
