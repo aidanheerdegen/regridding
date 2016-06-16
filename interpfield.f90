@@ -10,27 +10,28 @@ program interpfields
   use string_functions, only: join
   use file_functions, only: exists, freeunit, stderr, stdout, open
   use precision
-  use netcdf, only: nf90_inquire, nf90_inquire_variable
+  use netcdf, only: nf90_inquire, nf90_inquire_variable, nf90_inquire_dimension
 
   implicit none
 
   character(len=2000) :: vgridfile, datafile, outfile, outdir, weightsfile
-  character(len=200)  :: varname, depthname, zname
+  character(len=200)  :: varname, dimname, depthname, zname
   
   real(rd_kind), allocatable, target :: data(:,:,:,:), newdata(:,:,:,:)
+  real(rd_kind), allocatable, target :: data3d(:,:,:)
   real(rd_kind), allocatable :: vgrid(:), vgridsuper(:), lvl(:)
 
   real, allocatable :: weights(:)
   integer, allocatable :: neighbours(:,:)
 
   logical, allocatable :: land_mask(:,:)
-  logical :: first_field, set_outfile, set_outdir
+  logical :: first_field, set_outfile, set_outdir, interp, unlimited
 
-  integer :: id_grid, i, j, k, l, nlon, nlat, nlvl, error, nvgrid, nz, id_data, unit
-  integer :: nn1, nn2, pos, ii, id_out, ndim, nvar, ntime
+  integer :: id_grid, i, j, k, l, m, nlon, nlat, nlvl, error, nvgrid, nz, id_data, unit
+  integer :: nn1, nn2, pos, ii, id_out, ndim, nvar, ntime, dlen
 
   type(ncvar) :: vgridv, fieldv
-  real, allocatable :: lon(:), lat(:), time(:), dim(:)
+  real(rd_kind), allocatable :: lon(:), lat(:), time(:), dim(:)
 
   type (varying_string) :: myoptions(5)
 
@@ -181,6 +182,25 @@ program interpfields
 
      first_field = .true.
 
+     do i = 1, ndim
+        ! Copy all non z depth dimensions to output
+        call nc_check( nf90_inquire_dimension(id_data, i, name=dimname, len=dlen) )
+        if (dimname == zname) cycle
+        if (dimname == 'Time') then
+           unlimited = .true.
+        else
+           unlimited = .false.
+        end if
+        allocate(dim(dlen))
+        call nc_read(trim(datafile),trim(dimname),dim,ncid=id_data)
+        print *,i,trim(dimname),shape(dim)
+        call nc_write_dim(trim(outfile),dimname,x=dim,unlimited=unlimited)
+        deallocate(dim)
+     end do
+
+     ! Write updated z depth dimension to output
+     call nc_write_dim(trim(outfile),zname,x=real((/(ii,ii=1,nz)/),rd_kind))
+
      do i = 1, nvar
 
         ! Grab the varname for this variable id
@@ -192,14 +212,15 @@ program interpfields
         call nc_v_init(fieldv,trim(varname))
         call nc_get_att(id_data,fieldv,readmeta=.TRUE.)
 
-        ndims = size(fieldv%dims)
+        ndim = size(fieldv%dims)
         interp = .true.
-        if (ndims < 3) then
+        if (ndim == 1 .and. fieldv%dims(1) == fieldv%name) then
+           print *,'Skipping dimension'
+           cycle
+        else if (ndim < 4) then
            print *,'Copying this variable, insufficient dimensions: ',size(fieldv%dims)
            interp = .false.
-        end if
-
-        if (fieldv%dims(3) /= zname) then
+        else if (fieldv%dims(3) /= zname) then
            print *,'Copying this variable, no matching dimension found: ',trim(zname)
            interp = .false.
         end if
@@ -208,56 +229,59 @@ program interpfields
 
         nlon = fieldv%dlen(1)
         nlat = fieldv%dlen(2)
-        nlvl = fieldv%dlen(3)
-        ntime = fieldv%dlen(4)
-        
-        allocate(lon(nlon),lat(nlat),lvl(nlvl),time(ntime))
-        allocate(newdata(nlon,nlat,nz,ntime),data(nlon,nlat,nlvl,ntime))
 
-        print *,nlon,'x',nlat,'x',nz,'x',ntime
-        
-        if (first_field) then
-           ! Read longitude and latitude variables
-           call nc_read(trim(datafile),trim(fieldv%dims(1)),lon,ncid=id_data)
-           call nc_read(trim(datafile),trim(fieldv%dims(2)),lat,ncid=id_data)
-           call nc_read(trim(datafile),trim(fieldv%dims(3)),lvl,ncid=id_data)
-           call nc_read(trim(datafile),trim(fieldv%dims(4)),time,ncid=id_data)
-        end if
-        call nc_read(trim(datafile),trim(varname),data,ncid=id_data)
+        if (interp) then
 
-        do m = 1, ntime
-           do l = 1, nz
-              nn1 = neighbours(1,l)
-              nn2 = neighbours(2,l)
-              print *,'time: ',m,'level: ',l
-              do k = 1, nlat
-                 do j = 1, nlon
-                    ! New value is a weighted sum of the two closest values from original vertical grid
-                    newdata(j,k,l,m) = data(j,k,nn1,m) + (data(j,k,nn2,m) - data(j,k,nn1,m))*weights(l)
-                    ! print '(3I6,2X,2(F0.4,2X))',l,k,j, data(j,k,l), newdata(j,k,l) 
+           nlvl = fieldv%dlen(3)
+           ntime = fieldv%dlen(4)
+           
+           allocate(newdata(nlon,nlat,nz,ntime),data(nlon,nlat,nlvl,ntime))
+           
+           print *,nlon,'x',nlat,'x',nz,'x',ntime
+           
+           call nc_read(trim(datafile),trim(varname),data,ncid=id_data)
+           
+           do m = 1, ntime
+              do l = 1, nz
+                 nn1 = neighbours(1,l)
+                 nn2 = neighbours(2,l)
+                 print *,'time: ',m,'level: ',l
+                 do k = 1, nlat
+                    do j = 1, nlon
+                       ! New value is a weighted sum of the two closest values from original vertical grid
+                       newdata(j,k,l,m) = data(j,k,nn1,m) + (data(j,k,nn2,m) - data(j,k,nn1,m))*weights(l)
+                       ! print '(3I6,2X,2(F0.4,2X))',l,k,j, data(j,k,l), newdata(j,k,l) 
+                    end do
                  end do
               end do
            end do
-        end do
 
-        if (first_field) then
-           ! call nc_write_dim(trim(outfile),fieldv%dims(1),x=(/(ii,ii=1,nlon)/))
-           ! call nc_write_dim(trim(outfile),fieldv%dims(2),x=(/(ii,ii=1,nlat)/))
-           ! call nc_write_dim(trim(outfile),fieldv%dims(3),x=(/(ii,ii=1,nz)/))
-           call nc_write_dim(trim(outfile),fieldv%dims(1),x=lon)
-           call nc_write_dim(trim(outfile),fieldv%dims(2),x=lat)
-           call nc_write_dim(trim(outfile),fieldv%dims(3),x=(/(ii,ii=1,nz)/))
-           call nc_write_dim(trim(outfile),fieldv%dims(4),x=time,unlimited=.true.)
+           print *,fieldv%dims(1:4)
+           print *,shape(newdata)
+           print *,trim(varname)
+           call nc_write(trim(outfile),varname,newdata,dims=fieldv%dims(1:4),long_name=varname)
+           ! call nc_write(trim(outfile),varname,newdata,dim1=trim(fieldv%dims(1)),dim2=trim(fieldv%dims(2)),dim3=trim(fieldv%dims(3)))
+           ! call nc_write(trim(outfile),varname,newdata)
+
+           deallocate(newdata,data)
+
+        else
+
+           nlvl = 1
+           ntime = fieldv%dlen(3)
+           
+           allocate(data3d(nlon,nlat,ntime))
+           
+           print *,nlon,'x',nlat,'x',ntime
+           
+           call nc_read(trim(datafile),trim(varname),data3d,ncid=id_data)
+           
+           call nc_write(trim(outfile),varname,data3d,dims=fieldv%dims(1:3),long_name=varname)
+
+           deallocate(data3d)
+
         end if
-        print *,fieldv%dims(1:4)
-        print *,shape(newdata)
-        print *,trim(varname)
-        call nc_write(trim(outfile),varname,newdata,dims=fieldv%dims(1:4),long_name=varname)
-        ! call nc_write(trim(outfile),varname,newdata,dim1=trim(fieldv%dims(1)),dim2=trim(fieldv%dims(2)),dim3=trim(fieldv%dims(3)))
-        ! call nc_write(trim(outfile),varname,newdata)
      
-        deallocate(lon,lat,lvl,newdata,data,time)
-
         first_field = .false.
 
      end do
