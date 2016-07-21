@@ -20,6 +20,7 @@ program interpfields
   real(rd_kind), allocatable, target :: data(:,:,:,:), newdata(:,:,:,:)
   real(rd_kind), allocatable, target :: data3d(:,:,:), topog(:,:)
   real(rd_kind), allocatable :: vgrid(:), vgridsuper(:), lvl(:)
+  real(rd_kind), allocatable :: voldgrid(:), voldgridsuper(:)
 
   real(rd_kind) :: missing_value
 
@@ -29,13 +30,15 @@ program interpfields
   logical, allocatable :: bottomed_out(:,:)
   logical :: first_field, set_outfile, set_outdir, interp, unlimited
 
-  integer :: id_grid, i, j, k, l, m, nlon, nlat, nlvl, error, nvgrid, nz, id_data, unit
-  integer :: nn1, nn2, pos, ii, id_out, ndim, nvar, ntime, dlen, id_topog
+  integer :: id_grid, id_oldgrid, i, j, k, l, m, nlon, nlat, nlvl, error, nvgrid, nvoldgrid, nz, nzold
+  integer :: nn1, nn2, pos, ii, id_out, ndim, nvar, ntime, dlen, id_topog, id_data, unit
 
-  type(ncvar) :: vgridv, fieldv, topogv
+  type(ncvar) :: vgridv, voldgridv, fieldv, topogv
   real(rd_kind), allocatable :: lon(:), lat(:), time(:), dim(:)
 
-  type (varying_string) :: myoptions(6)
+  type (varying_string) :: myoptions(7)
+
+  logical :: debug
 
   ! These are our accepted command line options (see subroutine usage for
   ! an explanation)
@@ -45,6 +48,7 @@ program interpfields
   myoptions(4) = 'outfile'
   myoptions(5) = 'outdir'
   myoptions(6) = 'topogname'
+  myoptions(7) = 'debug'
 
   ! This call parses the command line arguments for command line options
   call get_options(myoptions, error)
@@ -62,11 +66,13 @@ program interpfields
      STOP
   end if
 
-  if (num_args() < 3) then
-     write(stderr,*) 'ERROR! Must supply new vgrid file, weights file and data file(s) as command-line arguments'
+  if (num_args() < 4) then
+     write(stderr,*) 'ERROR! Must supply old vgrid file, new vgrid file, weights file and data file(s) as command-line arguments'
      call usage
      STOP
   end if
+
+  debug = option_exists('debug')
 
   if (option_exists('vgridname')) then
      ! We have specified variable name for vertical grid variable
@@ -135,7 +141,32 @@ program interpfields
      set_outdir = .false.
   end if
 
-  ! Read in vertical grid
+  ! Arg 1: Read in old vertical grid
+  vgridfile = next_arg()
+  print *,'Reading in old vertical grid from ',trim(vgridfile)
+  call nc_open(trim(vgridfile), id_oldgrid, writable=.false.)
+
+  ! Initialize the netcdf vertical grid variable info and load attributes
+  call nc_v_init(voldgridv,trim(vgridname))
+  call nc_get_att(id_oldgrid,voldgridv,readmeta=.TRUE.)
+  call nc_print_attr(voldgridv)
+
+  ! Supercell
+  nvoldgrid = voldgridv%dlen(1)
+  nzold = (nvoldgrid - 1)/2
+
+  print *,' Number of old vgrid points ',nzold
+ 
+  allocate(voldgridsuper(nvoldgrid))
+  allocate(voldgrid(nzold))
+
+  call nc_read(trim(vgridfile),trim(vgridname),voldgridsuper,ncid=id_oldgrid)
+
+  ! Supergrid, so pull out every second cell
+  voldgrid = voldgridsuper(::2)
+
+
+  ! Arg 2: Read in vertical grid
   vgridfile = next_arg()
   print *,'Reading in new vertical grid from ',trim(vgridfile)
   call nc_open(trim(vgridfile), id_grid, writable=.false.)
@@ -160,7 +191,7 @@ program interpfields
   vgrid = vgridsuper(::2)
 
 
-  ! Read in topography grid -- need this to know when we're near the
+  ! Arg 3: Read in topography grid -- need this to know when we're near the
   ! ocean bottom boundary
   topogfile = next_arg()
   print *,'Reading in new vertical grid from ',trim(topogfile)
@@ -181,7 +212,7 @@ program interpfields
   call nc_read(trim(topogfile),trim(topogname),topog,ncid=id_topog)
 
 
-  ! Read in weights file
+  ! Arg 4: Read in weights file
   weightsfile = next_arg()
   print *,'Reading in new weights from ',trim(weightsfile)
   unit = open(trim(weightsfile))
@@ -302,15 +333,27 @@ program interpfields
                        if (bottomed_out(j,k)) cycle
                        if (vgrid(l) > topog(j,k)) then
                           ! We have definitely bottomed out!
+                          ! New value is just the value from the previous (higher) cell
                           ! New value is just the first of the neighbours from previous cell
-                          newdata(j,k,l,m) = data(j,k,neighbours(1,max(1,l-1)),m)
+                          newdata(j,k,l,m) = newdata(j,k,max(1,l-1),m)
                           bottomed_out(j,k) = .true.
-                       else if (vgrid(min(l+1,nz)) > topog(j,k)) then
+                          if (debug) print *,'Bottomed out: ',j,k,l,vgrid(l),topog(j,k),newdata(j,k,l,m),data(j,k,nn1,m),data(j,k,nn2,m)
+                       else if (voldgrid(nn1) > topog(j,k)) then
+                          ! The first neighbour is beyond the depth of the topography.
+                          ! We're probably at the bottom cell at this lat/lon, but test above
+                          ! should have picked this up. Set bottomed_out flag and use value from
+                          ! higher cell
+                          ! New value is just the value from the previous (higher) cell
+                          newdata(j,k,l,m) = newdata(j,k,max(1,l-1),m)
+                          if (debug) print *,'Bottomed out (nn1): ',j,k,l,vgrid(l),topog(j,k),newdata(j,k,l,m),data(j,k,nn1,m),data(j,k,nn2,m)
+                          bottomed_out(j,k) = .true.
+                       else if (voldgrid(nn2) > topog(j,k)) then
                           ! All bets are off, the interpolation pair in weights cannot be used as
                           ! we're at the bottom cell at this lat/lon, so original data values are
                           ! possibly bogus
-                          ! New value is just the first of the neighbours from previous cell
-                          newdata(j,k,l,m) = data(j,k,neighbours(1,max(1,l-1)),m)
+                          ! New value is just the first of the neighbours
+                          newdata(j,k,l,m) = data(j,k,nn1,m)
+                          if (debug) print *,'nn2 out of range: ',j,k,l,vgrid(l),topog(j,k),newdata(j,k,l,m),data(j,k,nn1,m),data(j,k,nn2,m)
                        else
                           ! New value is a weighted sum of the two closest values from original vertical grid
                           newdata(j,k,l,m) = data(j,k,nn1,m) + (data(j,k,nn2,m) - data(j,k,nn1,m))*weights(l)
@@ -378,7 +421,7 @@ contains
     write(stderr,*)
     write(stderr,*) 'Regrid data on to new vertical grid (vgrid) using precalculated weights'
     write(stderr,*)
-    write(stderr,*) 'Usage: interpfield [--help] vgrid weights datafile(s)'
+    write(stderr,*) 'Usage: interpfield [--help] vgrid weights topography datafile(s)'
     write(stderr,*)
     write(stderr,*) '  --help      - print this message'
     write(stderr,*) '  --vgridname - name of depth variable in vgrid file (default: zeta)'
